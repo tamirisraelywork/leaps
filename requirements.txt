@@ -1,0 +1,10 @@
+streamlit
+pandas
+yfinance
+requests
+beautifulsoup4
+google-cloud-bigquery
+google-auth
+db-dtypes
+playwright
+pandas
