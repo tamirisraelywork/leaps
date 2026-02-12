@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import sys
@@ -725,63 +724,80 @@ else:
         return results
 
 
-    def save_analysis_to_bigquery(ticker, report_data, risk_reward, llm_data):
+    def save_analysis_to_bigquery(ticker, report_data, risk_reward, llm_data, final_score, verdict):
+        """
+        Saves ticker details using Load Job (WRITE_TRUNCATE)
+        and updates/inserts a row in the master_table.
+        """
         ticker_clean = ticker.strip().upper().replace("-", "_").replace(".", "_")
-        table_id = f"{DATASET_ID}.{ticker_clean}"
+        ticker_table_id = f"{DATASET_ID}.{ticker_clean}"
+        master_table_id = f"{DATASET_ID}.{MASTER_TABLE_NAME}"
+
         try:
-            if "SERVICE_ACCOUNT_JSON" not in st.secrets: return "N/A"
+            if "SERVICE_ACCOUNT_JSON" not in st.secrets: return False
             service_info = dict(st.secrets["SERVICE_ACCOUNT_JSON"])
             if "private_key" in service_info:
                 service_info["private_key"] = service_info["private_key"].replace("\\n", "\n")
-            else:
-                return "N/A"
+
             credentials = service_account.Credentials.from_service_account_info(service_info)
             client = bigquery.Client(credentials=credentials, project=service_info.get("project_id"))
-            client.delete_table(table_id, not_found_ok=True)
-            schema = [
-                bigquery.SchemaField("Matric name", "STRING"),
-                bigquery.SchemaField("Source", "STRING"),
-                bigquery.SchemaField("Value", "STRING"),
-                bigquery.SchemaField("Obtained Score", "STRING"),
-                bigquery.SchemaField("Total score", "STRING"),
-                bigquery.SchemaField("LLM", "STRING"),
-            ]
-            table = bigquery.Table(table_id, schema=schema)
-            table = client.create_table(table)
-            import time
-            for _ in range(5):
-                try:
-                    client.get_table(table_id);
-                    break
-                except:
-                    time.sleep(2)
+
+            # 1. PREPARE TICKER DETAIL DATA
             rows_to_insert = []
             for row in report_data:
                 if row["Metric Name"] == "TOTAL": continue
-                rows_to_insert.append(
-                    {"Matric name": row["Metric Name"], "Source": row["Source"], "Value": str(row["Value"]),
-                     "Obtained Score": str(row["Obtained points"]), "Total score": str(row["Total points"]),
-                     "LLM": None})
-            risks_text = "\n".join(risk_reward.get("risks", []))
-            rows_to_insert.append(
-                {"Matric name": "Risks", "Source": None, "Value": None, "Obtained Score": None, "Total score": None,
-                 "LLM": risks_text})
-            rewards_text = "\n".join(risk_reward.get("rewards", []))
-            rows_to_insert.append(
-                {"Matric name": "Rewards", "Source": None, "Value": None, "Obtained Score": None, "Total score": None,
-                 "LLM": rewards_text})
-            for label, key in [("Company Description", "description"), ("Value Proposition", "value_proposition"),
-                               ("Moat Analysis", "moat")]:
-                rows_to_insert.append(
-                    {"Matric name": label, "Source": None, "Value": None, "Obtained Score": None, "Total score": None,
-                     "LLM": llm_data.get(key, "N/A")})
-            rows_to_insert.append(
-                {"Matric name": "DATE", "Source": None, "Value": None, "Obtained Score": None, "Total score": None,
-                 "LLM": datetime.date.today().strftime("%Y-%m-%d")})
-            errors = client.insert_rows_json(table_id, rows_to_insert)
-            return errors == []
+                rows_to_insert.append({
+                    "Matric name": row["Metric Name"], "Source": row["Source"], "Value": str(row["Value"]),
+                    "Obtained Score": str(row["Obtained points"]), "Total score": str(row["Total points"]),
+                    "LLM": None
+                })
+
+            # Add Qualitative Data
+            rows_to_insert.append({"Matric name": "Risks", "LLM": "\n".join(risk_reward.get("risks", []))})
+            rows_to_insert.append({"Matric name": "Rewards", "LLM": "\n".join(risk_reward.get("rewards", []))})
+            rows_to_insert.append({"Matric name": "Company Description", "LLM": llm_data.get("description", "N/A")})
+            rows_to_insert.append({"Matric name": "Value Proposition", "LLM": llm_data.get("value_proposition", "N/A")})
+            rows_to_insert.append({"Matric name": "Moat Analysis", "LLM": llm_data.get("moat", "N/A")})
+            rows_to_insert.append({"Matric name": "DATE", "LLM": datetime.date.today().strftime("%Y-%m-%d")})
+
+            # 2. UPDATE TICKER TABLE USING LOAD JOB (WRITE_TRUNCATE)
+            # This ensures 100% replacement of the specific ticker data
+            df_detail = pd.DataFrame(rows_to_insert)
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+            client.load_table_from_dataframe(df_detail, ticker_table_id, job_config=job_config).result()
+
+            # 3. UPDATE MASTER TABLE (UPSERT LOGIC)
+            # Check if ticker exists
+            check_query = f"SELECT Ticker FROM `{master_table_id}` WHERE Ticker = '{ticker}'"
+            exists = client.query(check_query).to_dataframe()
+
+            today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+            if not exists.empty:
+                # Update existing row
+                update_sql = f"""
+                    UPDATE `{master_table_id}`
+                    SET Score = {int(float(final_score))}, Verdict = '{verdict}', date = '{today_str}'
+                    WHERE Ticker = '{ticker}'
+                """
+            else:
+                # Insert new row
+                update_sql = f"""
+                    INSERT INTO `{master_table_id}` (Ticker, Score, Verdict, date)
+                    VALUES ('{ticker}', {int(float(final_score))}, '{verdict}', '{today_str}')
+                """
+
+            client.query(update_sql).result()
+            return True
         except Exception as e:
+            logger.error(f"BigQuery Save Error: {e}")
             return False
+
+
+    # --- UPDATE THE CALL AT THE BOTTOM OF THE SCRIPT ---
+    # Replace the very last lines of your code (the old call and success message) with this:
+
+
 
 
     if 'report_data' not in st.session_state: st.session_state.report_data = None
@@ -893,7 +909,7 @@ else:
 
             m_pts = {"runway": get_pts("runway"), "nd_ebitda": get_pts("net debt", "ebitda"),
                      "al_ratio": get_pts("assets", "liabilities"), "burn": get_pts("burn"),
-                     "share_growth": get_pts("share count"), "cap_struct": get_pts("capital structure"),
+                     "share_growth": get_pts("share count"), "expiration": get_pts("expiration"), "cap_struct": get_pts("capital structure"),
                      "mcap": get_pts("market cap"), "eps_growth": get_pts("eps growth"),
                      "op_lev": get_pts("operating leverage"), "iv_rank": get_pts("iv rank"),
                      "short": get_pts("short float"), "inst": get_pts("institutional ownership"),
@@ -913,8 +929,8 @@ else:
             s3 = to_f(m_pts["total_insider"]) + to_f(m_pts["ceo_own"]) + to_f(m_pts["ins_buy"])
             s4 = to_f(m_pts["moat"]) + to_f(m_pts["biz_model"])
             final_score = s1 + s2 + s3 + s4
-            verdict = "Rejected" if any(v == "rejected" for v in m_pts.values()) else (
-                "🔥 Elite LEAPS Candidate" if final_score >= 80 else "✅ Qualified" if final_score >= 70 else "⚠️ Watchlist" if final_score >= 60 else "❌ Reject")
+            verdict = "❌ Rejected" if any(v == "rejected" for v in m_pts.values()) else (
+                "🔥 Elite LEAPS Candidate" if final_score >= 80 else "✅ Qualified" if final_score >= 70 else "⚠️ Watchlist" if final_score >= 60 else "❌ Rejected")
 
             summary_df = pd.DataFrame([{
                 "Ticker": st.session_state.current_ticker,
@@ -950,6 +966,20 @@ else:
                 st.markdown("#### 🛡️ Moat Analysis")
                 st.markdown(f'<div class="report-card">{llm["moat"]}</div>', unsafe_allow_html=True)
 
-            save_analysis_to_bigquery(st.session_state.current_ticker, st.session_state.report_data,
-                                      st.session_state.risk_reward_data, st.session_state.llm_analysis)
-            st.success("Analysis saved to BigQuery.")
+
+
+
+    #New inserted code
+    if st.session_state.report_data:
+        success = save_analysis_to_bigquery(
+            st.session_state.current_ticker,
+            st.session_state.report_data,
+            st.session_state.risk_reward_data,
+            st.session_state.llm_analysis,
+            final_score,
+            verdict
+        )
+        if success:
+            st.success(f"Analysis for {st.session_state.current_ticker} saved/updated in Master Table.")
+        else:
+            st.error("Failed to update BigQuery. Check logs.")
