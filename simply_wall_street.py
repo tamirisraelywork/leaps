@@ -8,52 +8,43 @@ import streamlit as st
 POLYGON_API_KEY = st.secrets["POLYGON_API_KEY_2"]
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("Scraper")
 
 
 def get_company_name(ticker):
-
     url = f"https://api.polygon.io/v3/reference/tickers/{ticker.upper()}?apiKey={POLYGON_API_KEY}"
-
     try:
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            # Extract name
             name = data.get("results", {}).get("name")
             if name:
                 logger.info(f"Resolved ticker '{ticker}' to official name: '{name}'")
                 return name
-
     except Exception as e:
         logger.warning(f"Could not resolve name for {ticker} (using ticker as fallback). Error: {e}")
-
-    # Fallback: If API fails or name not found, just return the ticker
     return ticker
 
 
 def scrape_risk_rewards(ticker):
-
-
     official_name = get_company_name(ticker)
 
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # Updated Endpoint to match prompt requirements
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
 
     system_prompt = (
         "You are a precise financial data extractor specialized in the Simply Wall St (SWS) interface. "
-        "Your task is to provide the 'Rewards' and 'Risks' section exactly as it appears to a user on the SWS website. \n\n"
+        "Your task is to provide the 'Rewards' and 'Risks' section EXACTLY as it is displayed on the Simply Wall St website frontend. \n\n"
         "STRICT EXTRACTION RULES:\n"
-        "1. Use Google Search to find the specific simply wall street 'Risk & Reward' analysis for the stock.\n"
-        "2. Only extract the  bullet points display in user interface (e.g., 'Trading at 20% below fair value').\n"
-        "3. Do NOT provide general analysis or interpret risks and rewards on your own If data is missing, return empty lists.\n"
-        "4. CRITICAL: Your final output must be a valid raw JSON object string. Do not include Markdown formatting (like ```json). "
-        "The format must be strictly: {\"company\": \"...\", \"rewards\": [\"...\"], \"risks\": [\"...\"]}"
+        "1. Use Google Search to find the actual Simply Wall St 'Risk & Reward' analysis page for this specific stock.\n"
+        "2. ONLY extract the specific bullet points displayed in the UI (e.g., 'Trading at 20% below fair value' or 'Dividend is not well covered by earnings').\n"
+        "3. DO NOT assume, calculate, or interpret risks and rewards yourself.\n"
+        "4. DO NOT provide general financial advice or your own analysis.\n"
+        "5. CRITICAL: Your final output must be a valid raw JSON object string. Do not include Markdown formatting. "
+        "The format must be: {\"company\": \"...\", \"rewards\": [\"...\"], \"risks\": [\"...\"]}"
     )
 
-    # We use both the resolved name and ticker to ensure the AI searches for the right thing
     user_prompt = (
         f"Extract the Simply Wall St 'Risks & Rewards' UI bullet points for: "
         f"{official_name} (Ticker: {ticker.upper()})"
@@ -62,69 +53,73 @@ def scrape_risk_rewards(ticker):
     payload = {
         "contents": [{"parts": [{"text": user_prompt}]}],
         "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "tools": [{"google_search": {}}],  # Search Tool Enabled
+        "tools": [{"google_search": {}}],
         "generationConfig": {
             "temperature": 0.1
-
         }
     }
 
-    logger.info(f"Asking Gemini to search for: {official_name}...")
-
-    # Retry Logic
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            logger.info(f"Attempt {attempt + 1} for {ticker.upper()} (Gemini Search)...")
             response = requests.post(url, json=payload, timeout=60)
 
             if response.status_code != 200:
                 logger.error(f"Gemini API Error {response.status_code}: {response.text}")
-
-            response.raise_for_status()
-
+                response.raise_for_status()
 
             result_json = response.json()
             candidates = result_json.get('candidates', [])
 
             if not candidates:
-                logger.warning("Gemini returned no candidates.")
-                return {"company": official_name, "rewards": [], "risks": []}
+                raise ValueError("No candidates returned from Gemini")
 
             raw_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', "")
-
             if not raw_text:
-                logger.warning(f"No text content received for {ticker}")
-                return {"company": official_name, "rewards": [], "risks": []}
+                raise ValueError("Empty text part in Gemini response")
 
+            # JSON extraction logic
             json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-
             if json_match:
-                clean_json_str = json_match.group(0)
-                data = json.loads(clean_json_str)
+                data = json.loads(json_match.group(0))
             else:
-                # Try loading raw text if regex fails
                 data = json.loads(raw_text)
 
+            rewards = data.get("rewards", [])
+            risks = data.get("risks", [])
 
+            # CHECK: If both are empty, we force a retry
+            if not rewards and not risks:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Both Risks and Rewards were empty for {ticker}. Retrying (Attempt {attempt + 2})...")
+                    time.sleep(2)
+                    continue
+                else:
+                    logger.warning(f"Final attempt for {ticker} still returned empty data.")
+
+            # If we reach here, either we have data (one or both) OR we have exhausted retries
             final_data = {
                 "company": data.get("company", official_name),
-                "rewards": data.get("rewards", []),
-                "risks": data.get("risks", [])
+                "rewards": rewards,
+                "risks": risks
             }
 
             logger.info(f"Success! Found {len(final_data['rewards'])} rewards and {len(final_data['risks'])} risks.")
             return final_data
 
-        except (requests.exceptions.RequestException, json.JSONDecodeError, KeyError) as e:
+        except (requests.exceptions.RequestException, json.JSONDecodeError, KeyError, ValueError) as e:
             if attempt < max_retries - 1:
-                logger.warning(f"Attempt {attempt + 1} failed. Retrying...")
+                logger.warning(f"Technical error on attempt {attempt + 1}: {e}. Retrying...")
                 time.sleep(2)
             else:
-                logger.error(f"Final failure for {ticker}: {e}")
+                logger.error(f"Final technical failure for {ticker}: {e}")
                 return {"company": official_name, "rewards": [], "risks": []}
 
+    return {"company": official_name, "rewards": [], "risks": []}
 
-# --- Main Execution Block ---
+
 if __name__ == "__main__":
     logger.info("--- Starting Scraper Execution ---")
     ticker_input = "veri"
