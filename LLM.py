@@ -1,9 +1,3 @@
-
-
-
-
-
-
 import requests
 import json
 import time
@@ -128,8 +122,7 @@ STEP 3: If more than one rule seems to apply, use this tie-breaker order:
 Choose the earliest tag in this list that fits MOST of the evidence.
 
 
-5. Provide the most recent CEO ownership percentage for the given company. First, check the following trusted sources in order: SEC EDGAR (latest DEF 14A / proxy filings), Simply Wall St, GuruFocus, WhileWisdom, Tikr, Seeking Alpha, and Nasdaq.com. Use the first source where the data is available. If CEO ownership is not available on any of these sources, search for it on other reputable sources such as the company’s latest proxy statement, Bloomberg, Yahoo Finance, MarketWatch, FactSet, or Morningstar. Return the result strictly as a number followed by a percent sign (e.g., 12.6%). Do not include any text, explanation, context, or additional symbols only the number and percent sign. Ensure the value is the most recent available.
-
+5. Provide the most recent CEO ownership percentage for the given company. First, check the following trusted sources in order: SEC EDGAR (latest DEF 14A / proxy filings), Simply Wall St, GuruFocus, WhileWisdom, Tikr, Seeking Alpha, and Nasdaq.com. Use the first source where the data is available. If CEO ownership is not available on any of these sources, search for it on other reputable sources such as the company’s latest proxy statement, Bloomberg, Yahoo Finance, MarketWatch, FactSet, or Morningstar.Strict Requirement: You must not return '0%' or '0.0%' under any circumstances.Return the result strictly as a number followed by a percent sign (e.g., 12.6%). Do not include any text, explanation, context, or additional symbols—only the number and percent sign. Ensure the value is the most recent available.
 Then classify the company into ONE of the following categories based on its business model and moat strength.
 Return ONLY one category and its corresponding points.
 
